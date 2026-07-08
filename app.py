@@ -1,32 +1,23 @@
-import os
-import io
-import re
-import zipfile
-import urllib.request
-import json
+import os, io, re, zipfile, urllib.request, json, traceback
 from flask import Flask, request, jsonify, render_template, send_file, abort
 
 app = Flask(__name__)
 
-# ── Configuração (variáveis no Railway) ───────────────────────────────────────
-GOOGLE_API_KEY  = os.environ.get("GOOGLE_API_KEY", "")   # Chave API do Google
-DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")  # ID da pasta no Drive
+GOOGLE_API_KEY  = os.environ.get("GOOGLE_API_KEY", "")
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 
 MESES = ["","Janeiro","Fevereiro","Março","Abril","Maio","Junho",
          "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"]
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def limpar_cnpj(v: str) -> str:
-    return re.sub(r"\D", "", v)
+def limpar_cnpj(v): return re.sub(r"\D", "", v)
 
-def formatar_cnpj(v: str) -> str:
+def formatar_cnpj(v):
     v = limpar_cnpj(v)
-    return f"{v[:2]}.{v[2:5]}.{v[5:8]}/{v[8:12]}-{v[12:]}" if len(v) == 14 else v
+    return f"{v[:2]}.{v[2:5]}.{v[5:8]}/{v[8:12]}-{v[12:]}" if len(v)==14 else v
 
-def label_competencia(nome: str) -> str:
-    """Ex: GuiaPagamento_53578465000190_042026_... → Abril/2026"""
+def label_competencia(nome):
     m = re.search(r'[_\-](\d{2})(\d{4})[_\-]', nome)
     if m:
         mes, ano = int(m.group(1)), m.group(2)
@@ -34,37 +25,42 @@ def label_competencia(nome: str) -> str:
             return f"{MESES[mes]}/{ano}"
     return nome
 
-def drive_listar(folder_id: str) -> list:
-    """Lista arquivos na pasta do Drive (pasta deve ser pública)."""
-    url = (
-        f"{DRIVE_API}/files"
-        f"?q=%27{folder_id}%27+in+parents+and+trashed%3Dfalse"
-        f"&fields=files(id,name,mimeType,size)"
-        f"&key={GOOGLE_API_KEY}"
-        f"&pageSize=200"
-    )
+def drive_listar(folder_id):
+    url = (f"{DRIVE_API}/files?q=%27{folder_id}%27+in+parents+and+trashed%3Dfalse"
+           f"&fields=files(id,name,mimeType,size)&key={GOOGLE_API_KEY}&pageSize=200")
     with urllib.request.urlopen(url, timeout=10) as r:
         return json.loads(r.read())["files"]
 
-def drive_baixar(file_id: str) -> bytes:
-    """Baixa arquivo do Drive em memória."""
+def drive_listar_recursivo(folder_id):
+    """Lista arquivos em todos os subníveis da pasta."""
+    todos = []
+    try:
+        arquivos = drive_listar(folder_id)
+        for f in arquivos:
+            if f["mimeType"] == "application/vnd.google-apps.folder":
+                todos.extend(drive_listar_recursivo(f["id"]))
+            else:
+                todos.append(f)
+    except:
+        pass
+    return todos
+
+def drive_baixar(file_id):
     url = f"{DRIVE_API}/files/{file_id}?alt=media&key={GOOGLE_API_KEY}"
     with urllib.request.urlopen(url, timeout=30) as r:
         return r.read()
 
-def extrair_pdf_do_zip(dados: bytes) -> tuple[str, bytes] | None:
-    """Extrai o primeiro PDF de um ZIP. Retorna (nome, bytes) ou None."""
+def extrair_pdf_do_zip(dados):
     with zipfile.ZipFile(io.BytesIO(dados)) as zf:
         pdfs = [n for n in zf.namelist() if n.lower().endswith(".pdf")]
-        if not pdfs:
-            return None
+        if not pdfs: return None
         nome = os.path.basename(pdfs[0])
         return nome, zf.read(pdfs[0])
 
-# Cache em memória: {cnpj_arquivo: bytes}
-_cache: dict[str, bytes] = {}
+_cache: dict = {}
 
-# ── Rotas ─────────────────────────────────────────────────────────────────────
+# ── Rotas ──────────────────────────────────────────────────────
+
 @app.route("/minhas-guias")
 def index():
     return render_template("index.html")
@@ -83,10 +79,9 @@ def api_guias():
     try:
         arquivos = drive_listar_recursivo(DRIVE_FOLDER_ID)
     except Exception as e:
-        import traceback; traceback.print_exc()
+        traceback.print_exc()
         return jsonify({"erro": f"Erro ao acessar Drive: {e}"}), 500
 
-    # Filtrar arquivos que contém o CNPJ no nome
     encontrados = [f for f in arquivos if cnpj in re.sub(r"\D", "", f["name"])]
 
     if not encontrados:
@@ -99,13 +94,9 @@ def api_guias():
         fid  = arq["id"]
 
         if ext == ".pdf":
-            guias.append({
-                "label": label_competencia(nome),
-                "url":   f"/download/{cnpj}/{fid}/{nome}",
-            })
+            guias.append({"label": label_competencia(nome), "url": f"/download/{cnpj}/{fid}/{nome}"})
 
         elif ext == ".zip":
-            # Baixa e extrai PDF em memória
             try:
                 dados = drive_baixar(fid)
                 resultado = extrair_pdf_do_zip(dados)
@@ -123,14 +114,11 @@ def api_guias():
     if not guias:
         return jsonify({"erro": "Arquivos encontrados mas sem PDF válido. Contate a Move Online."}), 404
 
-    return jsonify({
-        "cnpj":    formatar_cnpj(cnpj),
-        "guias":   guias,
-    })
+    return jsonify({"cnpj": formatar_cnpj(cnpj), "guias": guias})
+
 
 @app.route("/download/<cnpj>/<file_id>/<nome>")
 def download_pdf_direto(cnpj, file_id, nome):
-    """PDF direto do Drive."""
     if not nome.lower().endswith(".pdf"):
         abort(403)
     try:
@@ -140,15 +128,14 @@ def download_pdf_direto(cnpj, file_id, nome):
     except Exception:
         abort(404)
 
+
 @app.route("/download/<cnpj>/zip/<file_id>/<nome>")
 def download_pdf_zip(cnpj, file_id, nome):
-    """PDF extraído de ZIP (servido do cache)."""
     if not nome.lower().endswith(".pdf"):
         abort(403)
     cache_key = f"{cnpj}_{file_id}"
     dados = _cache.get(cache_key)
     if not dados:
-        # Tenta baixar novamente se cache expirou
         try:
             zip_dados = drive_baixar(file_id)
             resultado = extrair_pdf_do_zip(zip_dados)
@@ -162,13 +149,14 @@ def download_pdf_zip(cnpj, file_id, nome):
     return send_file(io.BytesIO(dados), mimetype="application/pdf",
                      as_attachment=True, download_name=nome)
 
+
 @app.route("/api/debug-drive")
 def debug_drive():
-    """Lista todos os arquivos na pasta configurada (sem filtro por CNPJ)."""
+    """Lista todos os arquivos na pasta (sem filtro) — para diagnóstico."""
     if not GOOGLE_API_KEY or not DRIVE_FOLDER_ID:
         return jsonify({"erro": "GOOGLE_API_KEY ou DRIVE_FOLDER_ID não configurados"}), 500
     try:
-        arquivos = drive_listar(DRIVE_FOLDER_ID)
+        arquivos = drive_listar_recursivo(DRIVE_FOLDER_ID)
         return jsonify({
             "folder_id": DRIVE_FOLDER_ID,
             "total": len(arquivos),
@@ -176,21 +164,6 @@ def debug_drive():
         })
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
-
-
-def drive_listar_recursivo(folder_id: str) -> list:
-    """Lista arquivos em todos os subníveis da pasta."""
-    todos = []
-    try:
-        arquivos = drive_listar(folder_id)
-        for f in arquivos:
-            if f["mimeType"] == "application/vnd.google-apps.folder":
-                todos.extend(drive_listar_recursivo(f["id"]))
-            else:
-                todos.append(f)
-    except:
-        pass
-    return todos
 
 
 if __name__ == "__main__":
