@@ -3,8 +3,8 @@ from flask import Flask, request, jsonify, render_template, send_file, abort
 
 app = Flask(__name__)
 
-GOOGLE_API_KEY  = os.environ.get("GOOGLE_API_KEY", "")
-DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
+GOOGLE_API_KEY  = os.environ.get("GOOGLE_API_KEY", "AIzaSyBD4DtjQJ9gnBIAuuFXBG4cVQ3mVeBK4I0")
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "14MyvgfnpRMJQP-5YoEVSiyf2t7yiXdVf")
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 
