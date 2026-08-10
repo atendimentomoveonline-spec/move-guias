@@ -26,10 +26,23 @@ def label_competencia(nome):
     return nome
 
 def drive_listar(folder_id):
-    url = (f"{DRIVE_API}/files?q=%27{folder_id}%27+in+parents+and+trashed%3Dfalse"
-           f"&fields=files(id,name,mimeType,size)&key={GOOGLE_API_KEY}&pageSize=200")
-    with urllib.request.urlopen(url, timeout=10) as r:
-        return json.loads(r.read())["files"]
+    # PAGINA todos os arquivos: sem isso, so vinham os primeiros 200 e as guias
+    # dos clientes alem disso (a pasta ja passou de 300) ficavam invisiveis ->
+    # cliente recebia "nenhuma guia encontrada".
+    todos = []
+    token = None
+    while True:
+        url = (f"{DRIVE_API}/files?q=%27{folder_id}%27+in+parents+and+trashed%3Dfalse"
+               f"&fields=nextPageToken,files(id,name,mimeType,size)&key={GOOGLE_API_KEY}&pageSize=200")
+        if token:
+            url += f"&pageToken={token}"
+        with urllib.request.urlopen(url, timeout=15) as r:
+            d = json.loads(r.read())
+        todos.extend(d.get("files", []))
+        token = d.get("nextPageToken")
+        if not token:
+            break
+    return todos
 
 def drive_listar_recursivo(folder_id):
     """Lista arquivos em todos os subníveis da pasta."""
